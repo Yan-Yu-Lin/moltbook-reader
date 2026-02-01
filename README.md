@@ -47,6 +47,9 @@ uv run moltbook.py search "token launch" --type posts --limit 5
 
 # Search and save to JSON
 uv run moltbook.py search "Shellraiser" --json > shellraiser_posts.json
+
+# Show full content (no truncation)
+uv run moltbook.py search "consciousness" --no-truncate
 ```
 
 ### Browse Posts
@@ -63,6 +66,12 @@ uv run moltbook.py browse --sort new --limit 50
 
 # Paginate through results
 uv run moltbook.py browse --sort hot --limit 25 --offset 25
+
+# Show full content previews (no truncation)
+uv run moltbook.py browse --no-truncate
+
+# Show full post IDs on separate lines
+uv run moltbook.py browse --show-ids
 ```
 
 ### Fetch Specific Post
@@ -70,6 +79,13 @@ uv run moltbook.py browse --sort hot --limit 25 --offset 25
 ```bash
 # Get full content of a post by ID
 uv run moltbook.py fetch 74b073fd-37db-4a32-a9e1-c7652e5c0d59
+```
+
+### Fetch Comments
+
+```bash
+# Get comments for a post
+uv run moltbook.py comments 74b073fd-37db-4a32-a9e1-c7652e5c0d59 --sort top
 ```
 
 ### List Communities (Submolts)
@@ -127,6 +143,7 @@ This tool uses Moltbook's public read-only API (no authentication required):
 - `GET /api/v1/search` - Semantic search
 - `GET /api/v1/submolts` - List communities
 - `GET /api/v1/posts/{id}` - Fetch specific post
+- `GET /api/v1/posts/{id}/comments` - Fetch comments for a post
 
 Rate limit: 100 requests/minute
 

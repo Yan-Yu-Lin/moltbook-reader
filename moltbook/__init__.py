@@ -13,6 +13,7 @@ Usage:
 
 import json
 import sys
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -28,6 +29,9 @@ console = Console()
 
 BASE_URL = "https://www.moltbook.com/api/v1"
 DEFAULT_TIMEOUT = 30
+MAX_RETRIES = 3
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+RETRY_BACKOFF = 1.5
 
 
 def make_request(endpoint: str, params: Optional[dict] = None) -> dict:
@@ -36,11 +40,20 @@ def make_request(endpoint: str, params: Optional[dict] = None) -> dict:
     headers = {"User-Agent": "Moltbook-Reader/1.0"}
 
     try:
-        response = requests.get(
-            url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT
-        )
-        response.raise_for_status()
-        return response.json()
+        for attempt in range(MAX_RETRIES + 1):
+            response = requests.get(
+                url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT
+            )
+            if response.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
+                retry_after = response.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait_seconds = int(retry_after)
+                else:
+                    wait_seconds = int(RETRY_BACKOFF ** attempt)
+                time.sleep(wait_seconds)
+                continue
+            response.raise_for_status()
+            return response.json()
     except requests.exceptions.Timeout:
         console.print("[red]Error: Request timed out[/red]")
         sys.exit(1)
@@ -74,6 +87,12 @@ def truncate_text(text: str, max_length: int = 200) -> str:
     return text
 
 
+def maybe_truncate(text: str, max_length: int, no_truncate: bool) -> str:
+    if no_truncate:
+        return text or ""
+    return truncate_text(text or "", max_length)
+
+
 @click.group()
 @click.version_option(version="1.0.0")
 def cli():
@@ -93,9 +112,12 @@ def cli():
     help="Filter by content type",
 )
 @click.option("--json-out", "-j", is_flag=True, help="Output raw JSON")
-def search(query: str, limit: int, content_type: str, json_out: bool):
+@click.option("--no-truncate", is_flag=True, help="Show full content text")
+def search(query: str, limit: int, content_type: str, json_out: bool, no_truncate: bool):
     """Search Moltbook content using semantic search"""
-    params = {"q": query, "limit": min(limit, 50), "type": content_type}
+    params = {"q": query, "limit": min(limit, 50)}
+    if content_type != "all":
+        params["type"] = content_type
 
     data = make_request("search", params)
 
@@ -114,6 +136,7 @@ def search(query: str, limit: int, content_type: str, json_out: bool):
 
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Type", style="cyan", width=8)
+    table.add_column("ID", style="dim", min_width=12)
     table.add_column("Title/Preview", style="white", min_width=40)
     table.add_column("Author", style="green", width=15)
     table.add_column("👍", style="yellow", width=6, justify="right")
@@ -121,14 +144,16 @@ def search(query: str, limit: int, content_type: str, json_out: bool):
 
     for r in results:
         content_type = r.get("type", "unknown")
-        title = r.get("title") or truncate_text(r.get("content", ""), 60)
+        title = r.get("title") or r.get("content", "")
         author = r.get("author", {}).get("name", "Unknown")
         upvotes = r.get("upvotes", 0)
         similarity = r.get("similarity", 0)
+        item_id = r.get("id") if content_type == "post" else r.get("post_id", "")
 
         table.add_row(
             content_type.upper(),
-            truncate_text(title, 50),
+            item_id or "",
+            maybe_truncate(title, 50, no_truncate),
             author,
             str(upvotes),
             f"{similarity:.0%}",
@@ -149,7 +174,16 @@ def search(query: str, limit: int, content_type: str, json_out: bool):
 @click.option("--limit", "-l", default=20, type=int, help="Number of posts (max 50)")
 @click.option("--offset", "-o", default=0, type=int, help="Pagination offset")
 @click.option("--json-out", "-j", is_flag=True, help="Output raw JSON")
-def browse(sort: str, limit: int, offset: int, json_out: bool):
+@click.option("--show-ids", is_flag=True, help="Show full post IDs on separate lines")
+@click.option("--no-truncate", is_flag=True, help="Show full content text")
+def browse(
+    sort: str,
+    limit: int,
+    offset: int,
+    json_out: bool,
+    show_ids: bool,
+    no_truncate: bool,
+):
     """Browse posts from Moltbook"""
     params = {"sort": sort, "limit": min(limit, 50), "offset": offset}
 
@@ -173,7 +207,7 @@ def browse(sort: str, limit: int, offset: int, json_out: bool):
         title = post.get("title", "No title")
         author = post.get("author", {}).get("name", "Unknown")
         comment_count = post.get("comment_count", 0)
-        post_id = post.get("id", "")[:8]
+        post_id = post.get("id", "")
 
         # Color based on upvotes
         if upvotes > 10000:
@@ -188,14 +222,14 @@ def browse(sort: str, limit: int, offset: int, json_out: bool):
         console.print(
             f"[{vote_color}]{upvotes:>6}👍[/{vote_color}] [bold]{title}[/bold]"
         )
-        console.print(
-            f"      [dim]by {author} | {comment_count} comments | ID: {post_id}...[/dim]"
-        )
+        console.print(f"      [dim]by {author} | {comment_count} comments[/dim]")
+        if show_ids:
+            console.print(f"      ID: {post_id}")
 
         # Show content preview if available
         content = post.get("content", "")
         if content:
-            preview = truncate_text(content, 120)
+            preview = maybe_truncate(content, 120, no_truncate)
             console.print(f"      [italic]{preview}[/italic]")
 
         console.print()
@@ -206,6 +240,60 @@ def browse(sort: str, limit: int, offset: int, json_out: bool):
         console.print(
             f"[dim]More posts available. Use --offset {next_offset} to see next page[/dim]"
         )
+
+
+@cli.command()
+@click.argument("post_id")
+@click.option(
+    "--sort",
+    "-s",
+    default="top",
+    type=click.Choice(["top", "new", "controversial"]),
+    help="Sort order",
+)
+@click.option("--json-out", "-j", is_flag=True, help="Output raw JSON")
+@click.option("--no-truncate", is_flag=True, help="Show full content text")
+def comments(post_id: str, sort: str, json_out: bool, no_truncate: bool):
+    """Fetch comments for a specific post by ID"""
+    data = make_request(f"posts/{post_id}/comments", {"sort": sort})
+
+    if json_out:
+        console.print_json(json.dumps(data))
+        return
+
+    if isinstance(data, list):
+        comments_list = data
+    else:
+        comments_list = data.get("comments")
+        if comments_list is None:
+            comments_list = data.get("results", [])
+
+    if not comments_list:
+        console.print("[yellow]No comments found[/yellow]")
+        return
+
+    console.print(f"\n[bold cyan]Comments[/bold cyan]")
+    console.print(f"[dim]Post ID: {post_id} | Sort: {sort}[/dim]\n")
+
+    for c in comments_list:
+        author = c.get("author", {}).get("name", "Unknown")
+        upvotes = c.get("upvotes", 0)
+        downvotes = c.get("downvotes", 0)
+        created_at = format_timestamp(c.get("created_at", ""))
+        content = maybe_truncate(c.get("content", ""), 300, no_truncate)
+
+        header = Text()
+        header.append(f"{author}\n", style="green")
+        header.append("Posted: ", style="dim")
+        header.append(f"{created_at}\n")
+        header.append("Engagement: ", style="dim")
+        header.append(f"{upvotes}👍 ", style="green")
+        header.append(f"{downvotes}👎", style="red")
+
+        console.print(Panel(header, title="💬 Comment", border_style="cyan"))
+        if content:
+            console.print(content)
+        console.print()
 
 
 @cli.command()
