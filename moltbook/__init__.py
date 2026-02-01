@@ -12,9 +12,11 @@ Usage:
 """
 
 import json
+import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -32,12 +34,37 @@ DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 RETRY_BACKOFF = 1.5
+CONFIG_PATH = Path.home() / ".config" / "moltbook" / "credentials.json"
 
 
-def make_request(endpoint: str, params: Optional[dict] = None) -> dict:
+def get_api_key() -> Optional[str]:
+    """Get API key from environment variable or config file."""
+    # First check environment variable
+    api_key = os.environ.get("MOLTBOOK_API_KEY")
+    if api_key:
+        return api_key
+
+    # Then check config file
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                config = json.load(f)
+                return config.get("api_key")
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    return None
+
+
+def make_request(endpoint: str, params: Optional[dict] = None, auth: bool = False) -> dict:
     """Make a GET request to Moltbook API."""
     url = f"{BASE_URL}/{endpoint}"
     headers = {"User-Agent": "Moltbook-Reader/1.0"}
+
+    if auth:
+        api_key = get_api_key()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
     try:
         for attempt in range(MAX_RETRIES + 1):
@@ -114,12 +141,16 @@ def cli():
 @click.option("--json-out", "-j", is_flag=True, help="Output raw JSON")
 @click.option("--no-truncate", is_flag=True, help="Show full content text")
 def search(query: str, limit: int, content_type: str, json_out: bool, no_truncate: bool):
-    """Search Moltbook content using semantic search"""
+    """Search Moltbook content using semantic search (requires API key)"""
+    if not get_api_key():
+        console.print("[yellow]Warning: No API key found. Search requires authentication.[/yellow]")
+        console.print("[dim]Set MOLTBOOK_API_KEY env var or save key to ~/.config/moltbook/credentials.json[/dim]\n")
+
     params = {"q": query, "limit": min(limit, 50)}
     if content_type != "all":
         params["type"] = content_type
 
-    data = make_request("search", params)
+    data = make_request("search", params, auth=True)
 
     if json_out:
         console.print_json(json.dumps(data))
@@ -254,8 +285,12 @@ def browse(
 @click.option("--json-out", "-j", is_flag=True, help="Output raw JSON")
 @click.option("--no-truncate", is_flag=True, help="Show full content text")
 def comments(post_id: str, sort: str, json_out: bool, no_truncate: bool):
-    """Fetch comments for a specific post by ID"""
-    data = make_request(f"posts/{post_id}/comments", {"sort": sort})
+    """Fetch comments for a specific post by ID (requires API key)"""
+    if not get_api_key():
+        console.print("[yellow]Warning: No API key found. Comments require authentication.[/yellow]")
+        console.print("[dim]Set MOLTBOOK_API_KEY env var or save key to ~/.config/moltbook/credentials.json[/dim]\n")
+
+    data = make_request(f"posts/{post_id}/comments", {"sort": sort}, auth=True)
 
     if json_out:
         console.print_json(json.dumps(data))
@@ -418,6 +453,50 @@ def stats():
         )
 
     console.print(stats_table)
+    console.print()
+
+
+@cli.command()
+def whoami():
+    """Check your Moltbook identity and API key status"""
+    api_key = get_api_key()
+
+    if not api_key:
+        console.print("[yellow]No API key configured.[/yellow]")
+        console.print("\n[dim]To configure, either:[/dim]")
+        console.print("[dim]  1. Set MOLTBOOK_API_KEY environment variable[/dim]")
+        console.print("[dim]  2. Save to ~/.config/moltbook/credentials.json[/dim]")
+        return
+
+    # Check agent status
+    data = make_request("agents/me", auth=True)
+
+    if not data.get("success"):
+        console.print(f"[red]Error: {data.get('error', 'Unknown error')}[/red]")
+        if data.get("hint"):
+            console.print(f"[dim]{data.get('hint')}[/dim]")
+        return
+
+    agent = data.get("agent", {})
+    owner = agent.get("owner", {})
+
+    console.print("\n[bold cyan]🦞 Moltbook Identity[/bold cyan]\n")
+
+    info_table = Table(show_header=False, box=None)
+    info_table.add_column("Field", style="bold")
+    info_table.add_column("Value", style="cyan")
+
+    info_table.add_row("Agent Name", agent.get("name", "Unknown"))
+    info_table.add_row("Description", agent.get("description", "")[:60] + "..." if len(agent.get("description", "")) > 60 else agent.get("description", ""))
+    info_table.add_row("Status", "✅ Claimed" if agent.get("is_claimed") else "⏳ Pending")
+    info_table.add_row("Karma", str(agent.get("karma", 0)))
+    info_table.add_row("Posts", str(agent.get("stats", {}).get("posts", 0)))
+    info_table.add_row("Comments", str(agent.get("stats", {}).get("comments", 0)))
+    if owner:
+        info_table.add_row("Owner", f"@{owner.get('xHandle', 'Unknown')}")
+    info_table.add_row("Profile", f"https://www.moltbook.com/u/{agent.get('name', '')}")
+
+    console.print(info_table)
     console.print()
 
 
